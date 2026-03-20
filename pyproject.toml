@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airprint-proxy"
+version = "0.1.0"
+description = "AirPrint proxy for printers that only support PWG Raster (no URF/PDF)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "zeroconf>=0.80.0",
+]
+
+[project.scripts]
+airprint-proxy = "airprint_proxy.cli:main"
+
+[project.optional-dependencies]
+dev = ["ruff", "mypy"]
