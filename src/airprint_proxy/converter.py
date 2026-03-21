@@ -160,14 +160,118 @@ def _manual_urf_to_pwg(data: bytes, resolution: int) -> bytes:
     return output
 
 
+def _make_minimal_ppd(resolution: int, color: bool) -> str:
+    """Generate a minimal PPD file for use with cupsfilter."""
+    color_model = "RGB" if color else "Gray"
+    return f"""*PPD-Adobe: "4.3"
+*FormatVersion: "4.3"
+*FileVersion: "1.0"
+*LanguageVersion: English
+*LanguageEncoding: ISOLatin1
+*PCFileName: "AIRPRINT.PPD"
+*Manufacturer: "AirPrint"
+*ModelName: "AirPrint Proxy"
+*ShortNickName: "AirPrint Proxy"
+*NickName: "AirPrint Proxy"
+*PSVersion: "(3010.000) 0"
+*LanguageLevel: "3"
+*ColorDevice: {'True' if color else 'False'}
+*DefaultColorSpace: {'RGB' if color else 'Gray'}
+*FileSystem: False
+*Throughput: "1"
+*LandscapeOrientation: Plus90
+*VariablePaperSize: True
+*TTRasterizer: Type42
+
+*OpenUI *PageSize: PickOne
+*OrderDependency: 10 AnySetup *PageSize
+*DefaultPageSize: Letter
+*PageSize Letter: "<</PageSize[612 792]>>setpagedevice"
+*PageSize A4: "<</PageSize[595 842]>>setpagedevice"
+*CloseUI: *PageSize
+
+*OpenUI *PageRegion: PickOne
+*OrderDependency: 10 AnySetup *PageRegion
+*DefaultPageRegion: Letter
+*PageRegion Letter: "<</PageSize[612 792]>>setpagedevice"
+*PageRegion A4: "<</PageSize[595 842]>>setpagedevice"
+*CloseUI: *PageRegion
+
+*DefaultImageableArea: Letter
+*ImageableArea Letter: "9 9 603 783"
+*ImageableArea A4: "9 9 586 833"
+
+*DefaultPaperDimension: Letter
+*PaperDimension Letter: "612 792"
+*PaperDimension A4: "595 842"
+
+*OpenUI *ColorModel: PickOne
+*OrderDependency: 10 AnySetup *ColorModel
+*DefaultColorModel: {color_model}
+*ColorModel RGB: "<</cupsColorSpace 19/cupsColorOrder 0/cupsBitsPerColor 8>>setpagedevice"
+*ColorModel Gray: "<</cupsColorSpace 18/cupsColorOrder 0/cupsBitsPerColor 8>>setpagedevice"
+*CloseUI: *ColorModel
+
+*OpenUI *Resolution: PickOne
+*OrderDependency: 10 AnySetup *Resolution
+*DefaultResolution: {resolution}dpi
+*Resolution {resolution}dpi: "<</HWResolution[{resolution} {resolution}]>>setpagedevice"
+*CloseUI: *Resolution
+
+*cupsFilter: "application/vnd.cups-raster 0 rastertoepson"
+"""
+
+
 def pdf_to_pwg_raster(data: bytes, resolution: int = 360,
-                       width_pts: int = 595, height_pts: int = 842,
                        color: bool = True) -> bytes:
-    """Convert PDF to PWG Raster using Ghostscript."""
+    """Convert PDF to PWG Raster.
+
+    Uses cupsfilter if available (proven to produce correct output),
+    otherwise falls back to Ghostscript.
+    """
+    cupsfilter = _find_tool("cupsfilter")
+    if cupsfilter:
+        return _pdf_to_pwg_via_cupsfilter(data, resolution, color, cupsfilter)
+    return _pdf_to_pwg_via_ghostscript(data, resolution, color)
+
+
+def _pdf_to_pwg_via_cupsfilter(data: bytes, resolution: int, color: bool,
+                                 cupsfilter: str) -> bytes:
+    """Convert PDF to PWG Raster using the CUPS filter pipeline."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = os.path.join(tmpdir, "input.pdf")
+        ppd_path = os.path.join(tmpdir, "printer.ppd")
+
+        with open(pdf_path, "wb") as f:
+            f.write(data)
+        with open(ppd_path, "w") as f:
+            f.write(_make_minimal_ppd(resolution, color))
+
+        cmd = [
+            cupsfilter,
+            "-m", "image/pwg-raster",
+            "-p", ppd_path,
+            pdf_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        # cupsfilter returns 0 or 1 on success
+        if result.returncode not in (0, 1):
+            log.warning("cupsfilter failed (rc=%d), falling back to Ghostscript",
+                        result.returncode)
+            return _pdf_to_pwg_via_ghostscript(data, resolution, color)
+        if not result.stdout:
+            log.warning("cupsfilter produced no output, falling back to Ghostscript")
+            return _pdf_to_pwg_via_ghostscript(data, resolution, color)
+
+        return result.stdout
+
+
+def _pdf_to_pwg_via_ghostscript(data: bytes, resolution: int, color: bool) -> bytes:
+    """Convert PDF to PWG Raster using Ghostscript (fallback)."""
     gs = _find_tool("gs")
     if not gs:
-        raise RuntimeError("Ghostscript (gs) is required for PDF conversion but not found. "
-                          "Install it with: apt install ghostscript")
+        raise RuntimeError("Neither cupsfilter nor Ghostscript (gs) found. "
+                          "Install one: apt install cups-filters ghostscript")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         pdf_path = os.path.join(tmpdir, "input.pdf")
@@ -176,17 +280,11 @@ def pdf_to_pwg_raster(data: bytes, resolution: int = 360,
         with open(pdf_path, "wb") as f:
             f.write(data)
 
-        # Render PDF to raw RGB/Gray PPM images
         device = "ppmraw" if color else "pgmraw"
-        width_px = int(width_pts * resolution / 72)
-        height_px = int(height_pts * resolution / 72)
-
         cmd = [
             gs, "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER",
             f"-sDEVICE={device}",
             f"-r{resolution}",
-            f"-g{width_px}x{height_px}",
-            "-dFitPage",
             f"-sOutputFile={ppm_path}-%03d.ppm",
             pdf_path,
         ]
@@ -194,7 +292,6 @@ def pdf_to_pwg_raster(data: bytes, resolution: int = 360,
         if result.returncode != 0:
             raise RuntimeError(f"Ghostscript failed: {result.stderr.decode(errors='replace')}")
 
-        # Convert PPM pages to PWG Raster
         pages = sorted(Path(tmpdir).glob("page-*.ppm"))
         if not pages:
             raise RuntimeError("Ghostscript produced no output pages")

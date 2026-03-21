@@ -479,6 +479,13 @@ class IPPRequestHandler(BaseHTTPRequestHandler):
 
         log.info("Converted %d bytes (%s) → %d bytes (PWG Raster), forwarding to %s",
                  len(data), content_type, len(pwg_data), printer.host)
+        # Debug: save both input and output for inspection
+        import tempfile, os
+        with open(f"/tmp/debug_input_{job_id}.pdf", "wb") as f:
+            f.write(data)
+        with open(f"/tmp/debug_output_{job_id}.pwg", "wb") as f:
+            f.write(pwg_data)
+        log.debug("Saved debug files: /tmp/debug_input_%d.pdf and /tmp/debug_output_%d.pwg", job_id, job_id)
 
         # Build IPP Print-Job request for the real printer
         ipp = b""
