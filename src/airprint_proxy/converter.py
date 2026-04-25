@@ -163,6 +163,8 @@ def _manual_urf_to_pwg(data: bytes, resolution: int) -> bytes:
 def _make_minimal_ppd(resolution: int, color: bool) -> str:
     """Generate a minimal PPD file for use with cupsfilter."""
     color_model = "RGB" if color else "Gray"
+    # 12pt margins (~4.2mm) — matches typical inkjet hardware margins
+    margin = 12
     return f"""*PPD-Adobe: "4.3"
 *FormatVersion: "4.3"
 *FileVersion: "1.0"
@@ -185,25 +187,25 @@ def _make_minimal_ppd(resolution: int, color: bool) -> str:
 
 *OpenUI *PageSize: PickOne
 *OrderDependency: 10 AnySetup *PageSize
-*DefaultPageSize: Letter
-*PageSize Letter: "<</PageSize[612 792]>>setpagedevice"
+*DefaultPageSize: A4
 *PageSize A4: "<</PageSize[595 842]>>setpagedevice"
+*PageSize Letter: "<</PageSize[612 792]>>setpagedevice"
 *CloseUI: *PageSize
 
 *OpenUI *PageRegion: PickOne
 *OrderDependency: 10 AnySetup *PageRegion
-*DefaultPageRegion: Letter
-*PageRegion Letter: "<</PageSize[612 792]>>setpagedevice"
+*DefaultPageRegion: A4
 *PageRegion A4: "<</PageSize[595 842]>>setpagedevice"
+*PageRegion Letter: "<</PageSize[612 792]>>setpagedevice"
 *CloseUI: *PageRegion
 
-*DefaultImageableArea: Letter
-*ImageableArea Letter: "9 9 603 783"
-*ImageableArea A4: "9 9 586 833"
+*DefaultImageableArea: A4
+*ImageableArea A4: "{margin} {margin} {595-margin} {842-margin}"
+*ImageableArea Letter: "{margin} {margin} {612-margin} {792-margin}"
 
-*DefaultPaperDimension: Letter
-*PaperDimension Letter: "612 792"
+*DefaultPaperDimension: A4
 *PaperDimension A4: "595 842"
+*PaperDimension Letter: "612 792"
 
 *OpenUI *ColorModel: PickOne
 *OrderDependency: 10 AnySetup *ColorModel
@@ -218,7 +220,7 @@ def _make_minimal_ppd(resolution: int, color: bool) -> str:
 *Resolution {resolution}dpi: "<</HWResolution[{resolution} {resolution}]>>setpagedevice"
 *CloseUI: *Resolution
 
-*cupsFilter: "application/vnd.cups-raster 0 rastertoepson"
+*cupsFilter: "application/vnd.cups-raster 0 -"
 """
 
 
@@ -231,7 +233,18 @@ def pdf_to_pwg_raster(data: bytes, resolution: int = 360,
     """
     cupsfilter = _find_tool("cupsfilter")
     if cupsfilter:
-        return _pdf_to_pwg_via_cupsfilter(data, resolution, color, cupsfilter)
+        log.info("Using cupsfilter for PDF→PWG conversion")
+        result = _pdf_to_pwg_via_cupsfilter(data, resolution, color, cupsfilter)
+        # Debug: log PWG raster dimensions from page header
+        if result[:4] == b"RaS2" and len(result) >= 1800:
+            import struct as _s
+            _w = _s.unpack_from(">I", result, 4 + 372)[0]
+            _h = _s.unpack_from(">I", result, 4 + 376)[0]
+            _rx = _s.unpack_from(">I", result, 4 + 276)[0]
+            _ry = _s.unpack_from(">I", result, 4 + 280)[0]
+            log.info("PWG raster page: %dx%d pixels, %dx%d dpi", _w, _h, _rx, _ry)
+        return result
+    log.info("Using Ghostscript for PDF→PWG conversion")
     return _pdf_to_pwg_via_ghostscript(data, resolution, color)
 
 

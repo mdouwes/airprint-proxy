@@ -22,7 +22,7 @@ def build_txt_records(printer: PrinterConfig, proxy_port: int) -> dict[str, str]
     """Build TXT records that make macOS/iOS recognize this as an AirPrint printer."""
     resolution = printer.pwg_raster_resolutions[0] if printer.pwg_raster_resolutions else 360
 
-    urf_string = f"CP1,MT1-2-8,RS{resolution},SRGB24,W8,OB10,PQ3-4-5"
+    urf_string = f"V1.4,CP1,IS1,MT1-2-8,RS{resolution},SRGB24,W8,OB10,PQ3-4-5"
     if not printer.duplex:
         urf_string += ",DM1"
     else:
@@ -49,6 +49,7 @@ def build_txt_records(printer: PrinterConfig, proxy_port: int) -> dict[str, str]
         "Fax": "F",
         "kind": "document,envelope,photo",
         "PaperMax": "legal-A4",
+        "TLS": "1.2",
     }
 
 
@@ -89,6 +90,19 @@ class AirPrintAdvertiser:
             stderr=subprocess.DEVNULL,
         )
         log.info("Registered AirPrint service via dns-sd (with _universal subtype): %s", self.printer.name)
+
+        # Also register IPPS (TLS) service for iOS compatibility
+        ipps_cmd = [
+            "dns-sd", "-R", self.printer.name,
+            "_ipps._tcp,_universal", "local", str(self.proxy_port + 1),
+        ] + txt_args
+
+        self._dns_sd_ipps_proc = subprocess.Popen(
+            ipps_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log.info("Registered IPPS service on port %d: %s", self.proxy_port + 1, self.printer.name)
 
     def _start_zeroconf(self, txt: dict[str, str]):
         """Use python-zeroconf for Linux."""
@@ -172,6 +186,10 @@ class AirPrintAdvertiser:
             self._dns_sd_proc.terminate()
             self._dns_sd_proc = None
             log.info("dns-sd process stopped")
+        if hasattr(self, '_dns_sd_ipps_proc') and self._dns_sd_ipps_proc is not None:
+            self._dns_sd_ipps_proc.terminate()
+            self._dns_sd_ipps_proc = None
+            log.info("dns-sd IPPS process stopped")
 
         if self.zeroconf and self.service_info:
             log.info("Unregistering mDNS services...")

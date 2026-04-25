@@ -82,6 +82,19 @@ The proxy implements enough of the IPP protocol to satisfy macOS and iOS:
 - `Create-Job` + `Send-Document` -- two-step print (used by macOS)
 - `Validate-Job`, `Get-Jobs`, `Get-Job-Attributes`, `Cancel-Job`
 
+## TLS (IPPS) for iOS
+
+iOS requires IPPS (IPP-over-TLS) for printer discovery. The proxy starts a
+TLS listener on `proxy_port + 1` if it finds `proxy-cert.pem` and
+`proxy-key.pem` in the project root. Generate a self-signed pair once:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -keyout proxy-key.pem \
+    -out proxy-cert.pem -days 3650 -subj "/CN=AirPrint Proxy"
+```
+
+These files are gitignored — they are local to each install.
+
 ## Running as a systemd service
 
 Create `/etc/systemd/system/airprint-proxy.service`:
@@ -107,6 +120,15 @@ Then:
 ```bash
 systemctl daemon-reload
 systemctl enable --now airprint-proxy
+```
+
+## Running as a launchd job (macOS)
+
+Copy `com.airprint-proxy.plist.example` to `~/Library/LaunchAgents/com.airprint-proxy.plist`,
+edit the username and printer IP placeholders, then load it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.airprint-proxy.plist
 ```
 
 ## Tested with

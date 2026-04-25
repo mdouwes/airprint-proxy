@@ -6,3 +6,10 @@ build/
 .venv/
 .env
 *.log
+
+# TLS material — generate locally, never commit
+proxy-cert.pem
+proxy-key.pem
+
+# Local launchd config (use com.airprint-proxy.plist.example as a template)
+com.airprint-proxy.plist

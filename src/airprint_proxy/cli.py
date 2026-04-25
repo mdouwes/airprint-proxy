@@ -5,12 +5,17 @@ import logging
 import signal
 import socket
 import sys
+import threading
+import time
 
 from .advertiser import AirPrintAdvertiser
 from .config import PrinterConfig, discover_printer
 from .proxy import run_proxy
 
 log = logging.getLogger("airprint_proxy")
+
+DISCOVER_MAX_RETRIES = 10
+DISCOVER_RETRY_DELAY = 5  # seconds
 
 
 def get_local_ip() -> str:
@@ -23,6 +28,18 @@ def get_local_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def wait_for_network(timeout: int = 60) -> bool:
+    """Wait until a non-loopback IP is available (network is up)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ip = get_local_ip()
+        if ip != "127.0.0.1":
+            return True
+        log.info("Waiting for network...")
+        time.sleep(2)
+    return False
 
 
 def main():
@@ -52,10 +69,14 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # Wait for network before proceeding (important for launchd startup)
+    if not wait_for_network():
+        log.warning("Network not available, continuing with loopback IP")
+
     proxy_ip = args.proxy_ip or get_local_ip()
     log.info("Proxy IP: %s", proxy_ip)
 
-    # Discover printer capabilities
+    # Discover printer capabilities (with retries for boot-time startup)
     if args.no_discover:
         printer = PrinterConfig(
             name=args.name or "AirPrint Printer",
@@ -64,14 +85,22 @@ def main():
             resource=args.printer_resource,
         )
     else:
-        log.info("Querying printer at %s:%d%s ...",
-                 args.printer_host, args.printer_port, args.printer_resource)
-        try:
-            printer = discover_printer(args.printer_host, args.printer_port,
-                                       args.printer_resource)
-        except Exception as e:
-            log.error("Failed to query printer: %s", e)
-            log.info("Use --no-discover to skip auto-detection")
+        printer = None
+        for attempt in range(1, DISCOVER_MAX_RETRIES + 1):
+            log.info("Querying printer at %s:%d%s (attempt %d/%d)...",
+                     args.printer_host, args.printer_port, args.printer_resource,
+                     attempt, DISCOVER_MAX_RETRIES)
+            try:
+                printer = discover_printer(args.printer_host, args.printer_port,
+                                           args.printer_resource)
+                break
+            except Exception as e:
+                log.warning("Failed to query printer: %s", e)
+                if attempt < DISCOVER_MAX_RETRIES:
+                    log.info("Retrying in %d seconds...", DISCOVER_RETRY_DELAY)
+                    time.sleep(DISCOVER_RETRY_DELAY)
+        if printer is None:
+            log.error("Could not reach printer after %d attempts", DISCOVER_MAX_RETRIES)
             sys.exit(1)
 
     if args.name:
@@ -88,11 +117,16 @@ def main():
         log.warning("Printer does not report PWG Raster support!")
         log.warning("Forwarded jobs may fail.")
 
-    # Start IPP proxy server
-    server = run_proxy(printer, proxy_ip, args.proxy_port)
+    # Start IPP proxy server (plain + TLS)
+    server, tls_server = run_proxy(printer, proxy_ip, args.proxy_port)
     log.info("IPP proxy listening on port %d", args.proxy_port)
 
-    # Start mDNS advertisement
+    # Start TLS server in background thread if available
+    if tls_server:
+        tls_thread = threading.Thread(target=tls_server.serve_forever, daemon=True)
+        tls_thread.start()
+
+    # Start mDNS advertisement (both IPP and IPPS)
     advertiser = AirPrintAdvertiser(printer, proxy_ip, args.proxy_port)
     advertiser.start()
     log.info("AirPrint advertised as '%s'", printer.name)
@@ -104,6 +138,8 @@ def main():
         log.info("Shutting down...")
         advertiser.stop()
         server.shutdown()
+        if tls_server:
+            tls_server.shutdown()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
